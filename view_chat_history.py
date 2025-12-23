@@ -3,7 +3,10 @@
 查看Claude Code对话历史记录的脚本
 
 使用方法:
-    python view_chat_history.py
+    python view_chat_history.py [路径]
+
+参数:
+    路径: 包含jsonl文件的目录（可选，默认为当前目录）
 
 可选参数:
     --limit N: 只显示最近的N条消息
@@ -15,6 +18,11 @@
     --no-color: 禁用颜色输出（默认自动检测）
     --export FILE: 导出到文本文件
     --include-agents: 包含代理文件
+
+示例:
+    python view_chat_history.py
+    python view_chat_history.py /path/to/chat/history
+    python view_chat_history.py ~/claude-sessions --deduplicate --no-thinking
 
 颜色说明:
     用户消息: 红色（醒目）
@@ -452,9 +460,17 @@ def export_to_file(messages: List[Dict[str, Any]],
 def main():
     parser = argparse.ArgumentParser(
         description='查看Claude Code对话历史记录',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例:
+    python view_chat_history.py
+    python view_chat_history.py /path/to/chat/history
+    python view_chat_history.py ~/claude-sessions --deduplicate --no-thinking
+        '''
     )
 
+    parser.add_argument('path', nargs='?', default='.',
+                        help='包含jsonl文件的目录（默认为当前目录）')
     parser.add_argument('--limit', type=int, metavar='N',
                         help='只显示最近的N条消息')
     parser.add_argument('--session', type=str, metavar='ID',
@@ -476,12 +492,20 @@ def main():
 
     args = parser.parse_args()
 
-    # 获取当前目录
-    current_dir = Path(__file__).parent
+    # 获取数据目录
+    data_dir = Path(args.path).expanduser().resolve()
+
+    if not data_dir.exists():
+        print(f"错误: 目录不存在: {data_dir}")
+        return
+
+    if not data_dir.is_dir():
+        print(f"错误: 路径不是目录: {data_dir}")
+        return
 
     # 加载所有消息
-    print("正在加载对话记录...")
-    all_messages = load_all_messages(current_dir, include_agents=args.include_agents)
+    print(f"正在加载对话记录... ({data_dir})")
+    all_messages = load_all_messages(data_dir, include_agents=args.include_agents)
 
     if not all_messages:
         print("没有找到任何对话消息")

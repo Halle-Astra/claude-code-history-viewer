@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 """
 快速查看对话历史统计信息
+
+使用方法:
+    python chat_stats.py [路径]
+
+参数:
+    路径: 包含jsonl文件的目录（可选，默认为当前目录）
+
+示例:
+    python chat_stats.py
+    python chat_stats.py /path/to/chat/history
+    python chat_stats.py ~/claude-sessions
 """
 
 import json
+import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -179,8 +191,24 @@ def format_timedelta(td: timedelta) -> str:
     return " ".join(parts)
 
 
-def get_stats():
-    current_dir = Path(__file__).parent
+def get_stats(data_dir: Path = None):
+    """获取对话历史统计信息
+
+    Args:
+        data_dir: 包含jsonl文件的目录，默认为当前工作目录
+    """
+    if data_dir is None:
+        data_dir = Path.cwd()
+    else:
+        data_dir = Path(data_dir)
+
+    if not data_dir.exists():
+        print(f"错误: 目录不存在: {data_dir}")
+        return
+
+    if not data_dir.is_dir():
+        print(f"错误: 路径不是目录: {data_dir}")
+        return
 
     # 统计信息
     all_messages = []  # 收集所有消息
@@ -191,7 +219,7 @@ def get_stats():
     latest_date = None
 
     # 遍历所有jsonl文件
-    for file_path in current_dir.glob('*.jsonl'):
+    for file_path in data_dir.glob('*.jsonl'):
         # 统计文件类型（但都要处理）
         if file_path.name.startswith('agent-'):
             files_by_type['agent'] += 1
@@ -364,4 +392,21 @@ def get_stats():
 
 
 if __name__ == '__main__':
-    get_stats()
+    parser = argparse.ArgumentParser(
+        description='查看对话历史统计信息',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例:
+    python chat_stats.py
+    python chat_stats.py /path/to/chat/history
+    python chat_stats.py ~/claude-sessions
+        '''
+    )
+    parser.add_argument(
+        'path',
+        nargs='?',
+        default='.',
+        help='包含jsonl文件的目录（默认为当前目录）'
+    )
+    args = parser.parse_args()
+    get_stats(args.path)
