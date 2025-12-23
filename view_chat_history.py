@@ -14,7 +14,7 @@
     --no-thinking: 不显示思考内容
     --no-tools: 不显示工具调用和输出
     --truncate: 截断长输出（默认显示完整内容）
-    --deduplicate: 去除重复消息
+    --no-deduplicate: 不去除重复消息（默认会自动去重）
     --no-color: 禁用颜色输出（默认自动检测）
     --export FILE: 导出到文本文件
     --include-agents: 包含代理文件
@@ -22,7 +22,8 @@
 示例:
     python view_chat_history.py
     python view_chat_history.py /path/to/chat/history
-    python view_chat_history.py ~/claude-sessions --deduplicate --no-thinking
+    python view_chat_history.py ~/claude-sessions --no-thinking
+    python view_chat_history.py . --no-deduplicate  # 保留重复消息
 
 颜色说明:
     用户消息: 红色（醒目）
@@ -465,7 +466,8 @@ def main():
 示例:
     python view_chat_history.py
     python view_chat_history.py /path/to/chat/history
-    python view_chat_history.py ~/claude-sessions --deduplicate --no-thinking
+    python view_chat_history.py ~/claude-sessions --no-thinking
+    python view_chat_history.py . --no-deduplicate  # 保留重复消息
         '''
     )
 
@@ -481,8 +483,8 @@ def main():
                         help='不显示工具调用和输出')
     parser.add_argument('--truncate', action='store_true',
                         help='截断长输出（限制行数和每行长度，默认显示完整内容）')
-    parser.add_argument('--deduplicate', action='store_true',
-                        help='去除重复的消息（适用于不同session有交叉内容的情况）')
+    parser.add_argument('--no-deduplicate', action='store_true',
+                        help='不去除重复消息（默认会自动去重）')
     parser.add_argument('--no-color', action='store_true',
                         help='禁用颜色输出（默认自动检测终端颜色支持）')
     parser.add_argument('--export', type=str, metavar='FILE',
@@ -511,13 +513,17 @@ def main():
         print("没有找到任何对话消息")
         return
 
-    # 去重处理
-    if args.deduplicate:
+    # 去重处理（默认启用）
+    if not args.no_deduplicate:
         original_count = len(all_messages)
         all_messages = deduplicate_messages(all_messages)
         removed_count = original_count - len(all_messages)
         if removed_count > 0:
-            print(f"去重: 移除了 {removed_count} 条重复消息（{original_count} → {len(all_messages)}）")
+            print(f"✓ 已去重: 移除了 {removed_count} 条重复消息（{original_count} → {len(all_messages)}）")
+        else:
+            print(f"✓ 已去重: 未发现重复消息")
+    else:
+        print(f"⚠️  未去重: 保留了所有消息（可能包含重复）")
 
     # 如果指定了会话ID，进行过滤
     if args.session:
