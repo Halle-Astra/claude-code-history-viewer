@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-快速查看对话历史统计信息
+快速查看对话历史统计信息（支持 Claude Code 和 kernelcat）
 
 使用方法:
-    python chat_stats.py [路径]
+    python chat_stats.py [路径] [--cli-name CLI工具]
 
 参数:
     路径: 包含jsonl文件的目录（可选，默认为当前目录）
 
+可选参数:
+    --cli-name: CLI工具名称，claude-code（默认）或 kcat（kernelcat）
+
 示例:
+    # Claude Code
     python chat_stats.py
     python chat_stats.py /path/to/chat/history
-    python chat_stats.py ~/claude-sessions
+
+    # kernelcat
+    python chat_stats.py /path/to/kernelcat/sessions --cli-name kcat
 """
 
 import json
@@ -19,7 +25,122 @@ import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+
+
+def parse_claude_code_line(data: Dict, file_path: Path) -> Tuple[Dict[str, Any], str]:
+    """解析 Claude Code 格式的一行
+
+    Returns:
+        (message_dict, session_id)
+    """
+    msg_type = data.get('type')
+    if msg_type not in ['user', 'assistant']:
+        return None, ''
+
+    # 检查是否有tool相关内容
+    has_tool_use = any(
+        c.get('type') == 'tool_use'
+        for c in data.get('message', {}).get('content', [])
+    )
+    has_tool_result = 'toolUseResult' in data
+
+    message = {
+        'type': msg_type,
+        'timestamp': data.get('timestamp', ''),
+        'uuid': data.get('uuid', ''),
+        'message': data.get('message', {}),
+        'session_id': data.get('sessionId', ''),
+        'has_tool_use': has_tool_use,
+        'has_tool_result': has_tool_result
+    }
+
+    return message, data.get('sessionId', '')
+
+
+def parse_kernelcat_line(data: Dict, file_path: Path) -> Tuple[Dict[str, Any], str]:
+    """解析 kernelcat 格式的一行
+
+    Returns:
+        (message_dict, session_id)
+    """
+    if data.get('type') != 'response_item':
+        return None, ''
+
+    payload = data.get('payload', {})
+    role = payload.get('role', '')
+    if role not in ['user', 'assistant']:
+        return None, ''
+
+    # kernelcat 没有 tool_use/tool_result 概念，默认设为 False
+    # 从文件名提取 session_id
+    session_id = file_path.stem.split('-')[-1]
+
+    # 转换为统一格式
+    message_content = []
+    for item in payload.get('content', []):
+        item_type = item.get('type', '')
+        if item_type in ['input_text', 'output_text']:
+            message_content.append({
+                'type': 'text',
+                'text': item.get('text', '')
+            })
+        else:
+            message_content.append(item)
+
+    message = {
+        'type': role,
+        'timestamp': data.get('timestamp', ''),
+        'uuid': '',  # kernelcat 没有 uuid
+        'message': {'content': message_content},
+        'session_id': session_id,
+        'has_tool_use': False,
+        'has_tool_result': False
+    }
+
+    return message, session_id
+
+
+def get_session_project(file_path: Path) -> str:
+    """从 kernelcat session 文件中提取项目路径
+
+    Args:
+        file_path: session 文件路径
+
+    Returns:
+        项目路径，如果无法获取则返回空字符串
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            first_line = f.readline()
+            if first_line.strip():
+                data = json.loads(first_line)
+                if data.get('type') == 'session_meta':
+                    payload = data.get('payload', {})
+                    return payload.get('cwd', '')
+    except:
+        pass
+    return ''
+
+
+def list_kernelcat_projects(directory: Path) -> Dict[str, int]:
+    """列出所有 kernelcat 项目及会话数
+
+    Args:
+        directory: kernelcat sessions 目录
+
+    Returns:
+        字典：项目路径 -> 会话数
+    """
+    projects = defaultdict(int)
+    jsonl_files = list(directory.glob('**/*.jsonl'))
+
+    for file_path in jsonl_files:
+        project = get_session_project(file_path)
+        if project:
+            projects[project] += 1
+
+    return dict(projects)
 
 
 def deduplicate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -191,11 +312,15 @@ def format_timedelta(td: timedelta) -> str:
     return " ".join(parts)
 
 
-def get_stats(data_dir: Path = None):
+def get_stats(data_dir: Path = None, cli_name: str = 'claude-code', project_filter: str = None,
+              group_by_project: bool = False):
     """获取对话历史统计信息
 
     Args:
         data_dir: 包含jsonl文件的目录，默认为当前工作目录
+        cli_name: CLI工具名称 ('claude-code' 或 'kcat')
+        project_filter: 项目路径过滤（仅用于kcat）
+        group_by_project: 是否按项目分组显示统计（仅用于kcat）
     """
     if data_dir is None:
         data_dir = Path.cwd()
@@ -215,16 +340,48 @@ def get_stats(data_dir: Path = None):
     sessions = set()
     files_by_type = {'main': 0, 'agent': 0}
     messages_by_date = defaultdict(int)
+    messages_by_project = defaultdict(list)  # 按项目收集消息（仅kcat）
     earliest_date = None
     latest_date = None
 
+    # 根据 CLI 类型选择文件搜索模式
+    if cli_name == 'claude-code':
+        jsonl_files = list(data_dir.glob('*.jsonl'))
+    elif cli_name == 'kcat':
+        jsonl_files = list(data_dir.glob('**/*.jsonl'))
+
+        # 如果指定了项目过滤
+        if project_filter:
+            filtered_files = []
+            for file_path in jsonl_files:
+                project = get_session_project(file_path)
+                if project and project_filter in project:
+                    filtered_files.append(file_path)
+            jsonl_files = filtered_files
+            if project_filter:
+                print(f"\n🔍 项目过滤: {project_filter}")
+    else:
+        print(f"错误: 不支持的 CLI 类型: {cli_name}")
+        return
+
+    # 选择解析器
+    parser_func = parse_claude_code_line if cli_name == 'claude-code' else parse_kernelcat_line
+
     # 遍历所有jsonl文件
-    for file_path in data_dir.glob('*.jsonl'):
-        # 统计文件类型（但都要处理）
-        if file_path.name.startswith('agent-'):
-            files_by_type['agent'] += 1
+    for file_path in jsonl_files:
+        # 统计文件类型（仅对 claude-code 有意义）
+        if cli_name == 'claude-code':
+            if file_path.name.startswith('agent-'):
+                files_by_type['agent'] += 1
+            else:
+                files_by_type['main'] += 1
         else:
             files_by_type['main'] += 1
+
+        # 获取项目信息（仅 kernelcat）
+        project = ''
+        if cli_name == 'kcat' and group_by_project:
+            project = get_session_project(file_path)
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -234,46 +391,37 @@ def get_stats(data_dir: Path = None):
 
                     try:
                         data = json.loads(line)
-                        msg_type = data.get('type')
 
-                        if msg_type in ['user', 'assistant']:
-                            # 检查是否有tool相关内容
-                            has_tool_use = any(
-                                c.get('type') == 'tool_use'
-                                for c in data.get('message', {}).get('content', [])
-                            )
-                            has_tool_result = 'toolUseResult' in data
+                        # 使用对应的解析器
+                        message, session_id = parser_func(data, file_path)
+                        if message is None:
+                            continue
 
-                            # 收集消息
-                            all_messages.append({
-                                'type': msg_type,
-                                'timestamp': data.get('timestamp', ''),
-                                'uuid': data.get('uuid', ''),
-                                'message': data.get('message', {}),
-                                'session_id': data.get('sessionId', ''),
-                                'has_tool_use': has_tool_use,
-                                'has_tool_result': has_tool_result
-                            })
+                        # 收集消息
+                        all_messages.append(message)
 
-                            # 记录会话ID
-                            session_id = data.get('sessionId', '')
-                            if session_id:
-                                sessions.add(session_id)
+                        # 如果需要按项目分组（仅 kernelcat）
+                        if cli_name == 'kcat' and group_by_project and project:
+                            messages_by_project[project].append(message)
 
-                            # 记录日期
-                            timestamp_str = data.get('timestamp', '')
-                            if timestamp_str:
-                                try:
-                                    dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                                    date_str = dt.strftime('%Y-%m-%d')
-                                    messages_by_date[date_str] += 1
+                        # 记录会话ID
+                        if session_id:
+                            sessions.add(session_id)
 
-                                    if earliest_date is None or dt < earliest_date:
-                                        earliest_date = dt
-                                    if latest_date is None or dt > latest_date:
-                                        latest_date = dt
-                                except:
-                                    pass
+                        # 记录日期
+                        timestamp_str = message.get('timestamp', '')
+                        if timestamp_str:
+                            try:
+                                dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                date_str = dt.strftime('%Y-%m-%d')
+                                messages_by_date[date_str] += 1
+
+                                if earliest_date is None or dt < earliest_date:
+                                    earliest_date = dt
+                                if latest_date is None or dt > latest_date:
+                                    latest_date = dt
+                            except:
+                                pass
 
                     except json.JSONDecodeError:
                         continue
@@ -386,6 +534,28 @@ def get_stats(data_dir: Path = None):
             bar = "█" * (count // 10) + "▌" * ((count % 10) // 5)
             print(f"   {date_str}: {count:4d} 条 {bar}")
 
+    # 按项目分组统计（仅 kernelcat）
+    if cli_name == 'kcat' and group_by_project and messages_by_project:
+        print(f"\n📁 按项目分组统计:")
+        print("="*80)
+
+        # 对每个项目计算统计
+        for project, project_messages in sorted(messages_by_project.items(),
+                                                 key=lambda x: len(x[1]), reverse=True):
+            # 去重
+            project_messages_dedup = deduplicate_messages(project_messages)
+            user_msgs = sum(1 for msg in project_messages_dedup if msg['type'] == 'user')
+            assistant_msgs = sum(1 for msg in project_messages_dedup if msg['type'] == 'assistant')
+
+            # 计算耗时
+            total_time, _ = calculate_total_time(project_messages_dedup)
+
+            print(f"\n📁 {project}")
+            print(f"   消息数: {len(project_messages_dedup)} 条（用户: {user_msgs}, 助手: {assistant_msgs}）")
+            print(f"   总耗时: {format_timedelta(total_time)}")
+
+        print("\n" + "="*80)
+
     print("\n" + "="*80)
     print("\n💡 查看完整对话内容:")
     print("   python3 view_chat_history.py --deduplicate --no-thinking --limit 50\n")
@@ -393,13 +563,18 @@ def get_stats(data_dir: Path = None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='查看对话历史统计信息',
+        description='查看对话历史统计信息（支持 Claude Code 和 kernelcat）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 示例:
+    # Claude Code（默认）
     python chat_stats.py
     python chat_stats.py /path/to/chat/history
-    python chat_stats.py ~/claude-sessions
+
+    # kernelcat
+    python chat_stats.py /path/to/kernelcat/sessions --cli-name kcat
+    python chat_stats.py /path/to/kernelcat/sessions --cli-name kcat --group-by-project
+    python chat_stats.py /path/to/kernelcat/sessions --cli-name kcat --project jax-dna
         '''
     )
     parser.add_argument(
@@ -408,5 +583,57 @@ if __name__ == '__main__':
         default='.',
         help='包含jsonl文件的目录（默认为当前目录）'
     )
+    parser.add_argument(
+        '--cli-name',
+        type=str,
+        default='claude-code',
+        choices=['claude-code', 'kcat'],
+        help='CLI工具名称：claude-code（默认）或 kcat（kernelcat）'
+    )
+
+    # kernelcat 专属参数
+    parser.add_argument(
+        '--list-projects',
+        action='store_true',
+        help='列出所有项目及会话数（仅用于kcat）'
+    )
+    parser.add_argument(
+        '--project',
+        type=str,
+        metavar='PATH',
+        help='按项目路径过滤（支持部分匹配，仅用于kcat）'
+    )
+    parser.add_argument(
+        '--group-by-project',
+        action='store_true',
+        help='按项目分组显示统计（仅用于kcat）'
+    )
+
     args = parser.parse_args()
-    get_stats(args.path)
+
+    data_dir = Path(args.path).expanduser().resolve()
+
+    # 如果是列出项目
+    if args.list_projects:
+        if args.cli_name != 'kcat':
+            print("错误: --list-projects 仅适用于 kernelcat (--cli-name kcat)")
+            exit(1)
+
+        projects = list_kernelcat_projects(data_dir)
+        if not projects:
+            print("未找到任何项目")
+            exit(0)
+
+        print(f"\n找到 {len(projects)} 个项目:\n")
+        print("="*80)
+        for project, count in sorted(projects.items(), key=lambda x: x[1], reverse=True):
+            print(f"\n📁 {project}")
+            print(f"   会话数: {count}")
+        print("\n" + "="*80)
+        print(f"\n💡 使用 --project 参数过滤特定项目:")
+        print(f"   python chat_stats.py {data_dir} --cli-name kcat --project <项目路径或关键字>")
+        print(f"\n💡 使用 --group-by-project 按项目分组统计:")
+        print(f"   python chat_stats.py {data_dir} --cli-name kcat --group-by-project\n")
+        exit(0)
+
+    get_stats(args.path, args.cli_name, args.project, args.group_by_project)

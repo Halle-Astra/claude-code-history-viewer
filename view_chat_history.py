@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-查看Claude Code对话历史记录的脚本
+查看 CLI 工具对话历史记录的脚本（支持 Claude Code 和 kernelcat）
 
 使用方法:
-    python view_chat_history.py [路径]
+    python view_chat_history.py [路径] [--cli-name CLI工具]
 
 参数:
     路径: 包含jsonl文件的目录（可选，默认为当前目录）
 
 可选参数:
+    --cli-name: CLI工具名称，claude-code（默认）或 kcat（kernelcat）
     --limit N: 只显示最近的N条消息
     --session ID: 只显示特定会话ID的消息
     --no-thinking: 不显示思考内容
@@ -17,13 +18,17 @@
     --no-deduplicate: 不去除重复消息（默认会自动去重）
     --no-color: 禁用颜色输出（默认自动检测）
     --export FILE: 导出到文本文件
-    --include-agents: 包含代理文件
+    --include-agents: 包含代理文件（仅用于claude-code）
 
 示例:
+    # Claude Code
     python view_chat_history.py
     python view_chat_history.py /path/to/chat/history
     python view_chat_history.py ~/claude-sessions --no-thinking
-    python view_chat_history.py . --no-deduplicate  # 保留重复消息
+
+    # kernelcat
+    python view_chat_history.py /path/to/kernelcat/sessions --cli-name kcat
+    python view_chat_history.py . --cli-name kcat --no-deduplicate
 
 颜色说明:
     用户消息: 红色（醒目）
@@ -96,9 +101,58 @@ def colorize(text: str, color: str, use_color: bool = True) -> str:
     return f"{color}{text}{Colors.RESET}"
 
 
-def load_messages_from_file(file_path: Path) -> List[Dict[str, Any]]:
-    """从单个JSONL文件中加载所有消息"""
+def parse_claude_code_message(data: Dict, file_name: str) -> Dict[str, Any]:
+    """解析 Claude Code 格式的消息"""
+    return {
+        'type': data['type'],
+        'timestamp': data.get('timestamp', ''),
+        'session_id': data.get('sessionId', ''),
+        'message': data.get('message', {}),
+        'uuid': data.get('uuid', ''),
+        'file': file_name
+    }
+
+
+def parse_kernelcat_message(data: Dict, file_name: str, session_id: str) -> Dict[str, Any]:
+    """解析 kernelcat 格式的消息"""
+    payload = data.get('payload', {})
+    role = payload.get('role', '')
+
+    # 转换为统一格式
+    message_content = []
+    for item in payload.get('content', []):
+        item_type = item.get('type', '')
+        # 将 input_text/output_text 统一转换为 text
+        if item_type in ['input_text', 'output_text']:
+            message_content.append({
+                'type': 'text',
+                'text': item.get('text', '')
+            })
+        else:
+            # 保留其他类型
+            message_content.append(item)
+
+    return {
+        'type': role,  # 'user' 或 'assistant'
+        'timestamp': data.get('timestamp', ''),
+        'session_id': session_id,
+        'message': {'content': message_content},
+        'uuid': '',  # kernelcat 没有 uuid，使用timestamp去重
+        'file': file_name
+    }
+
+
+def load_messages_from_file(file_path: Path, cli_name: str = 'claude-code') -> List[Dict[str, Any]]:
+    """从单个JSONL文件中加载所有消息
+
+    Args:
+        file_path: JSONL文件路径
+        cli_name: CLI工具名称 ('claude-code' 或 'kcat')
+    """
     messages = []
+
+    # 从文件名提取 session_id (用于 kernelcat)
+    session_id = file_path.stem.split('-')[-1] if cli_name == 'kcat' else ''
 
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -108,16 +162,21 @@ def load_messages_from_file(file_path: Path) -> List[Dict[str, Any]]:
 
                 try:
                     data = json.loads(line)
-                    # 只处理用户和助手的消息
-                    if data.get('type') in ['user', 'assistant']:
-                        messages.append({
-                            'type': data['type'],
-                            'timestamp': data.get('timestamp', ''),
-                            'session_id': data.get('sessionId', ''),
-                            'message': data.get('message', {}),
-                            'uuid': data.get('uuid', ''),  # 添加UUID用于去重
-                            'file': file_path.name
-                        })
+
+                    if cli_name == 'claude-code':
+                        # Claude Code 格式: type 在顶层
+                        if data.get('type') in ['user', 'assistant']:
+                            msg = parse_claude_code_message(data, file_path.name)
+                            messages.append(msg)
+
+                    elif cli_name == 'kcat':
+                        # kernelcat 格式: type=response_item，role在payload中
+                        if data.get('type') == 'response_item':
+                            payload = data.get('payload', {})
+                            if payload.get('role') in ['user', 'assistant']:
+                                msg = parse_kernelcat_message(data, file_path.name, session_id)
+                                messages.append(msg)
+
                 except json.JSONDecodeError:
                     continue
     except Exception as e:
@@ -156,21 +215,88 @@ def deduplicate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return unique_messages
 
 
-def load_all_messages(directory: Path, include_agents: bool = False) -> List[Dict[str, Any]]:
-    """加载目录中所有JSONL文件的消息"""
+def get_session_project(file_path: Path) -> str:
+    """从 kernelcat session 文件中提取项目路径
+
+    Args:
+        file_path: session 文件路径
+
+    Returns:
+        项目路径，如果无法获取则返回空字符串
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            first_line = f.readline()
+            if first_line.strip():
+                data = json.loads(first_line)
+                if data.get('type') == 'session_meta':
+                    payload = data.get('payload', {})
+                    return payload.get('cwd', '')
+    except:
+        pass
+    return ''
+
+
+def list_kernelcat_projects(directory: Path) -> Dict[str, List[Path]]:
+    """列出所有 kernelcat 项目及其会话文件
+
+    Args:
+        directory: kernelcat sessions 目录
+
+    Returns:
+        字典：项目路径 -> 会话文件列表
+    """
+    from collections import defaultdict
+
+    projects = defaultdict(list)
+    jsonl_files = list(directory.glob('**/*.jsonl'))
+
+    for file_path in jsonl_files:
+        project = get_session_project(file_path)
+        if project:
+            projects[project].append(file_path)
+
+    return dict(projects)
+
+
+def load_all_messages(directory: Path, include_agents: bool = False, cli_name: str = 'claude-code',
+                     project_filter: str = None) -> List[Dict[str, Any]]:
+    """加载目录中所有JSONL文件的消息
+
+    Args:
+        directory: 包含历史记录的目录
+        include_agents: 是否包含agent文件（仅用于claude-code）
+        cli_name: CLI工具名称 ('claude-code' 或 'kcat')
+        project_filter: 项目路径过滤（仅用于kcat）
+    """
     all_messages = []
 
-    # 获取所有.jsonl文件
-    jsonl_files = list(directory.glob('*.jsonl'))
+    if cli_name == 'claude-code':
+        # Claude Code: 扁平目录结构，所有文件在同一目录
+        jsonl_files = list(directory.glob('*.jsonl'))
+
+        # 过滤 agent 文件
+        if not include_agents:
+            jsonl_files = [f for f in jsonl_files if not f.name.startswith('agent-')]
+
+    elif cli_name == 'kcat':
+        # kernelcat: YYYY/MM/DD 目录结构
+        jsonl_files = list(directory.glob('**/*.jsonl'))
+
+        # 如果指定了项目过滤
+        if project_filter:
+            filtered_files = []
+            for file_path in jsonl_files:
+                project = get_session_project(file_path)
+                if project and project_filter in project:
+                    filtered_files.append(file_path)
+            jsonl_files = filtered_files
+            print(f"项目过滤: {project_filter}")
 
     print(f"找到 {len(jsonl_files)} 个对话记录文件")
 
     for file_path in jsonl_files:
-        # 除非明确要求，否则跳过agent文件
-        if not include_agents and file_path.name.startswith('agent-'):
-            continue
-
-        messages = load_messages_from_file(file_path)
+        messages = load_messages_from_file(file_path, cli_name)
         all_messages.extend(messages)
 
     # 按时间戳排序
@@ -460,19 +586,26 @@ def export_to_file(messages: List[Dict[str, Any]],
 
 def main():
     parser = argparse.ArgumentParser(
-        description='查看Claude Code对话历史记录',
+        description='查看 CLI 工具对话历史记录（支持 Claude Code 和 kernelcat）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 示例:
+    # Claude Code（默认）
     python view_chat_history.py
     python view_chat_history.py /path/to/chat/history
     python view_chat_history.py ~/claude-sessions --no-thinking
-    python view_chat_history.py . --no-deduplicate  # 保留重复消息
+
+    # kernelcat
+    python view_chat_history.py /path/to/kernelcat/sessions --cli-name kcat
+    python view_chat_history.py . --cli-name kcat --no-deduplicate
         '''
     )
 
     parser.add_argument('path', nargs='?', default='.',
                         help='包含jsonl文件的目录（默认为当前目录）')
+    parser.add_argument('--cli-name', type=str, default='claude-code',
+                        choices=['claude-code', 'kcat'],
+                        help='CLI工具名称：claude-code（默认）或 kcat（kernelcat）')
     parser.add_argument('--limit', type=int, metavar='N',
                         help='只显示最近的N条消息')
     parser.add_argument('--session', type=str, metavar='ID',
@@ -490,7 +623,13 @@ def main():
     parser.add_argument('--export', type=str, metavar='FILE',
                         help='导出到指定文件而不是显示在终端')
     parser.add_argument('--include-agents', action='store_true',
-                        help='包含代理（agent-*）文件')
+                        help='包含代理（agent-*）文件（仅用于claude-code）')
+
+    # kernelcat 专属参数
+    parser.add_argument('--list-projects', action='store_true',
+                        help='列出所有项目及会话数（仅用于kcat）')
+    parser.add_argument('--project', type=str, metavar='PATH',
+                        help='按项目路径过滤（支持部分匹配，仅用于kcat）')
 
     args = parser.parse_args()
 
@@ -505,9 +644,32 @@ def main():
         print(f"错误: 路径不是目录: {data_dir}")
         return
 
+    # kernelcat: 列出项目
+    if args.list_projects:
+        if args.cli_name != 'kcat':
+            print("错误: --list-projects 仅适用于 kernelcat (--cli-name kcat)")
+            return
+
+        projects = list_kernelcat_projects(data_dir)
+        if not projects:
+            print("未找到任何项目")
+            return
+
+        print(f"\n找到 {len(projects)} 个项目:\n")
+        print("="*80)
+        for project, files in sorted(projects.items(), key=lambda x: len(x[1]), reverse=True):
+            print(f"\n📁 {project}")
+            print(f"   会话数: {len(files)}")
+        print("\n" + "="*80)
+        print(f"\n💡 使用 --project 参数过滤特定项目:")
+        print(f"   python view_chat_history.py {data_dir} --cli-name kcat --project <项目路径或关键字>\n")
+        return
+
     # 加载所有消息
-    print(f"正在加载对话记录... ({data_dir})")
-    all_messages = load_all_messages(data_dir, include_agents=args.include_agents)
+    cli_display_name = 'kernelcat' if args.cli_name == 'kcat' else 'Claude Code'
+    print(f"正在加载对话记录... ({cli_display_name}: {data_dir})")
+    all_messages = load_all_messages(data_dir, include_agents=args.include_agents,
+                                    cli_name=args.cli_name, project_filter=args.project)
 
     if not all_messages:
         print("没有找到任何对话消息")
