@@ -59,6 +59,12 @@ python3 view_chat_history.py /path/to/kernelcat/sessions --cli-name kcat --proje
 
 # 查看项目的最近10条消息
 python3 view_chat_history.py /path/to/kernelcat/sessions --cli-name kcat --project sparsegp --limit 10 --no-thinking
+
+# 直接查看单个 jsonl 文件
+python3 view_chat_history.py --cli-name kcat --file /path/to/session.jsonl
+
+# 查看单个文件的最近5条消息（不显示思考和工具）
+python3 view_chat_history.py --cli-name kcat --file /path/to/session.jsonl --limit 5 --no-thinking --no-tools
 ```
 
 ### 查看统计信息
@@ -137,6 +143,7 @@ python3 view_chat_history.py --include-agents
 |------|------|------|
 | `--list-projects` | 列出所有项目及会话数 | `--list-projects` |
 | `--project PATH` | 按项目路径过滤（支持部分匹配）| `--project jax-dna` |
+| `--file JSONL` | 直接指定单个jsonl文件 | `--file /path/to/session.jsonl` |
 | `--group-by-project` | 按项目分组统计（仅 chat_stats.py）| `--group-by-project` |
 
 ## 颜色说明（v3.0新增）

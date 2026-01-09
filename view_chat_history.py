@@ -624,9 +624,13 @@ def main():
     python view_chat_history.py /path/to/chat/history
     python view_chat_history.py ~/claude-sessions --no-thinking
 
-    # kernelcat
+    # kernelcat - 查看目录
     python view_chat_history.py /path/to/kernelcat/sessions --cli-name kcat
     python view_chat_history.py . --cli-name kcat --no-deduplicate
+
+    # kernelcat - 查看单个文件
+    python view_chat_history.py --cli-name kcat --file /path/to/session.jsonl
+    python view_chat_history.py --cli-name kcat --file /path/to/session.jsonl --limit 10 --no-thinking
         '''
     )
 
@@ -659,15 +663,59 @@ def main():
                         help='列出所有项目及会话数（仅用于kcat）')
     parser.add_argument('--project', type=str, metavar='PATH',
                         help='按项目路径过滤（支持部分匹配，仅用于kcat）')
+    parser.add_argument('--file', type=str, metavar='JSONL',
+                        help='直接指定单个jsonl文件（仅用于kcat）')
 
     args = parser.parse_args()
 
-    # 获取数据目录
-    data_dir = Path(args.path).expanduser().resolve()
+    # 获取数据目录或文件
+    input_path = Path(args.path).expanduser().resolve()
 
-    if not data_dir.exists():
-        print(f"错误: 目录不存在: {data_dir}")
+    if not input_path.exists():
+        print(f"错误: 路径不存在: {input_path}")
         return
+
+    # 如果指定了 --file 参数（kernelcat 单文件模式）
+    if args.file:
+        if args.cli_name != 'kcat':
+            print("错误: --file 仅适用于 kernelcat (--cli-name kcat)")
+            return
+
+        file_path = Path(args.file).expanduser().resolve()
+        if not file_path.exists():
+            print(f"错误: 文件不存在: {file_path}")
+            return
+
+        if not file_path.is_file():
+            print(f"错误: 不是文件: {file_path}")
+            return
+
+        # 直接加载单个文件
+        print(f"正在加载单个会话文件... (kernelcat: {file_path})")
+        all_messages = load_messages_from_file(file_path, 'kcat')
+
+        if not all_messages:
+            print("文件中没有找到任何对话消息")
+            return
+
+        # 显示项目信息
+        project = get_session_project(file_path)
+        if project:
+            print(f"📁 项目: {project}")
+
+        print(f"✓ 加载了 {len(all_messages)} 条消息")
+
+        # 跳过去重（单文件不需要去重）
+        # 直接显示
+        if args.export:
+            export_to_file(all_messages, args.export, not args.no_thinking, not args.no_tools, args.truncate)
+        else:
+            use_color = None if not args.no_color else False
+            display_messages(all_messages, not args.no_thinking, not args.no_tools, args.truncate, args.limit, use_color)
+        return
+
+    # 原有的目录处理逻辑
+    data_dir = input_path
 
     if not data_dir.is_dir():
         print(f"错误: 路径不是目录: {data_dir}")
