@@ -259,6 +259,35 @@ def list_kernelcat_projects(directory: Path) -> Dict[str, List[Path]]:
     return dict(projects)
 
 
+def get_user_messages_from_file(file_path: Path, cli_name: str = 'kcat') -> List[str]:
+    """从文件中提取用户消息
+
+    Args:
+        file_path: 文件路径
+        cli_name: CLI 类型
+
+    Returns:
+        用户消息列表
+    """
+    user_messages = []
+    try:
+        messages = load_messages_from_file(file_path, cli_name)
+        for msg in messages:
+            if msg['type'] == 'user':
+                # 提取文本内容
+                content = msg.get('message', {}).get('content', [])
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        text = item.get('text', '').strip()
+                        if text:
+                            # 只取前100个字符
+                            preview = text[:100] + ('...' if len(text) > 100 else '')
+                            user_messages.append(preview)
+    except:
+        pass
+    return user_messages
+
+
 def load_all_messages(directory: Path, include_agents: bool = False, cli_name: str = 'claude-code',
                      project_filter: str = None) -> List[Dict[str, Any]]:
     """加载目录中所有JSONL文件的消息
@@ -656,11 +685,36 @@ def main():
             return
 
         print(f"\n找到 {len(projects)} 个项目:\n")
-        print("="*80)
+        print("="*120)
+
         for project, files in sorted(projects.items(), key=lambda x: len(x[1]), reverse=True):
             print(f"\n📁 {project}")
-            print(f"   会话数: {len(files)}")
-        print("\n" + "="*80)
+            print(f"   会话数: {len(files)}\n")
+
+            # 按时间排序文件
+            files_sorted = sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
+
+            for i, file_path in enumerate(files_sorted, 1):
+                # 获取用户消息
+                user_msgs = get_user_messages_from_file(file_path, 'kcat')
+
+                # 显示文件路径
+                print(f"   [{i}] {file_path}")
+
+                # 显示用户发言
+                if user_msgs:
+                    for j, msg in enumerate(user_msgs, 1):
+                        # 缩进显示用户消息
+                        msg_lines = msg.split('\n')
+                        print(f"       💬 用户消息 {j}: {msg_lines[0]}")
+                        for line in msg_lines[1:]:
+                            if line.strip():
+                                print(f"          {line}")
+                else:
+                    print(f"       （无用户消息）")
+                print()
+
+        print("="*120)
         print(f"\n💡 使用 --project 参数过滤特定项目:")
         print(f"   python view_chat_history.py {data_dir} --cli-name kcat --project <项目路径或关键字>\n")
         return

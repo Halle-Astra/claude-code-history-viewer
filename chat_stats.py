@@ -123,24 +123,62 @@ def get_session_project(file_path: Path) -> str:
     return ''
 
 
-def list_kernelcat_projects(directory: Path) -> Dict[str, int]:
-    """列出所有 kernelcat 项目及会话数
+def list_kernelcat_projects(directory: Path) -> Dict[str, List[Path]]:
+    """列出所有 kernelcat 项目及会话文件
 
     Args:
         directory: kernelcat sessions 目录
 
     Returns:
-        字典：项目路径 -> 会话数
+        字典：项目路径 -> 会话文件列表
     """
-    projects = defaultdict(int)
+    projects = defaultdict(list)
     jsonl_files = list(directory.glob('**/*.jsonl'))
 
     for file_path in jsonl_files:
         project = get_session_project(file_path)
         if project:
-            projects[project] += 1
+            projects[project].append(file_path)
 
     return dict(projects)
+
+
+def get_user_messages_from_file(file_path: Path) -> List[str]:
+    """从文件中提取用户消息
+
+    Args:
+        file_path: 文件路径
+
+    Returns:
+        用户消息列表
+    """
+    user_messages = []
+    try:
+        message, _ = parse_kernelcat_line({'type': 'dummy'}, file_path)  # 占位，实际读取文件
+
+        # 直接读取文件
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    if data.get('type') == 'response_item':
+                        payload = data.get('payload', {})
+                        if payload.get('role') == 'user':
+                            content = payload.get('content', [])
+                            for item in content:
+                                if isinstance(item, dict) and item.get('type') in ['input_text', 'text']:
+                                    text = item.get('text', '').strip()
+                                    if text:
+                                        # 只取前100个字符
+                                        preview = text[:100] + ('...' if len(text) > 100 else '')
+                                        user_messages.append(preview)
+                except:
+                    pass
+    except:
+        pass
+    return user_messages
 
 
 def deduplicate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -625,11 +663,36 @@ if __name__ == '__main__':
             exit(0)
 
         print(f"\n找到 {len(projects)} 个项目:\n")
-        print("="*80)
-        for project, count in sorted(projects.items(), key=lambda x: x[1], reverse=True):
+        print("="*120)
+
+        for project, files in sorted(projects.items(), key=lambda x: len(x[1]), reverse=True):
             print(f"\n📁 {project}")
-            print(f"   会话数: {count}")
-        print("\n" + "="*80)
+            print(f"   会话数: {len(files)}\n")
+
+            # 按时间排序文件
+            files_sorted = sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)
+
+            for i, file_path in enumerate(files_sorted, 1):
+                # 获取用户消息
+                user_msgs = get_user_messages_from_file(file_path)
+
+                # 显示文件路径
+                print(f"   [{i}] {file_path}")
+
+                # 显示用户发言
+                if user_msgs:
+                    for j, msg in enumerate(user_msgs, 1):
+                        # 缩进显示用户消息
+                        msg_lines = msg.split('\n')
+                        print(f"       💬 用户消息 {j}: {msg_lines[0]}")
+                        for line in msg_lines[1:]:
+                            if line.strip():
+                                print(f"          {line}")
+                else:
+                    print(f"       （无用户消息）")
+                print()
+
+        print("="*120)
         print(f"\n💡 使用 --project 参数过滤特定项目:")
         print(f"   python chat_stats.py {data_dir} --cli-name kcat --project <项目路径或关键字>")
         print(f"\n💡 使用 --group-by-project 按项目分组统计:")
