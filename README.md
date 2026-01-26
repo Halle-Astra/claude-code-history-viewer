@@ -153,24 +153,43 @@ python3 view_chat_history.py --include-agents
 
 ## Hook调用解析功能
 
-工具支持解析Claude Code的Hook调用历史。Hook是在特定事件（如工具执行、会话停止等）触发的自定义脚本或LLM检查。
+工具支持解析Claude Code的Hook调用历史。Hook是在特定事件触发时执行的自定义脚本或LLM检查。
 
-### Hook消息类型
+### Hook事件类型
 
-Claude Code中有两种Hook消息类型：
+Claude Code支持12种Hook事件类型：
 
-#### 1. Stop Hook（停止钩子）
+| Hook事件 | 触发时机 |
+|---------|---------|
+| SessionStart | 会话开始或恢复 |
+| UserPromptSubmit | 用户提交提示 |
+| PreToolUse | 工具执行前 |
+| PermissionRequest | 权限对话框出现时 |
+| PostToolUse | 工具执行成功后 |
+| PostToolUseFailure | 工具执行失败后 |
+| SubagentStart | 生成子代理时 |
+| SubagentStop | 子代理完成时 |
+| Stop | Claude完成响应时 |
+| PreCompact | 上下文压缩前 |
+| SessionEnd | 会话终止时 |
+| Notification | Claude Code发送通知时 |
+
+### Hook消息格式
+
+Hook消息有两种底层格式：
+
+#### 1. stop_hook_summary格式
 - **消息类型**: `type: "system", subtype: "stop_hook_summary"`
-- **触发时机**: 当Claude停止响应时
-- **用途**: 检查任务完成状态、验证输出等
-- **Hook名称**: `Stop`
+- **常见用途**: Stop事件的hook摘要
+- **位置**: 主会话文件中
 
-#### 2. PostToolUse Hook（工具后钩子）
+#### 2. hook_progress格式
 - **消息类型**: `type: "progress", data.type: "hook_progress"`
-- **触发时机**: 在工具执行成功后
-- **用途**: 验证工具输出、执行后续操作等
-- **Hook名称**: `PostToolUse:ToolName`（如 `PostToolUse:Bash`、`PostToolUse:Edit`）
+- **包含字段**: `hookEvent`（事件类型）、`hookName`（完整名称）
+- **常见用途**: PostToolUse、PreToolUse等事件
 - **位置**: 通常在subagent文件中（需要使用 `--include-agents` 加载）
+
+**注意**: 这两种格式可以表示任何Hook事件类型，具体事件由 `hookEvent` 或上下文决定。
 
 ### Hook配置类型
 
