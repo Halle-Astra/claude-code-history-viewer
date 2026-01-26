@@ -103,7 +103,7 @@ def colorize(text: str, color: str, use_color: bool = True) -> str:
 
 def parse_claude_code_message(data: Dict, file_name: str) -> Dict[str, Any]:
     """解析 Claude Code 格式的消息"""
-    return {
+    result = {
         'type': data['type'],
         'timestamp': data.get('timestamp', ''),
         'session_id': data.get('sessionId', ''),
@@ -111,6 +111,28 @@ def parse_claude_code_message(data: Dict, file_name: str) -> Dict[str, Any]:
         'uuid': data.get('uuid', ''),
         'file': file_name
     }
+
+    # 如果是system类型的hook消息，添加hook特有字段
+    if data['type'] == 'system' and data.get('subtype') == 'stop_hook_summary':
+        result['subtype'] = data.get('subtype')
+        result['hookCount'] = data.get('hookCount', 0)
+        result['hookInfos'] = data.get('hookInfos', [])
+        result['hookErrors'] = data.get('hookErrors', [])
+        result['preventedContinuation'] = data.get('preventedContinuation', False)
+        result['hasOutput'] = data.get('hasOutput', False)
+        result['toolUseID'] = data.get('toolUseID', '')
+
+    # 如果是progress类型的hook_progress消息，添加hook特有字段
+    elif data['type'] == 'progress' and data.get('data', {}).get('type') == 'hook_progress':
+        hook_data = data.get('data', {})
+        result['subtype'] = 'hook_progress'
+        result['hookEvent'] = hook_data.get('hookEvent', '')
+        result['hookName'] = hook_data.get('hookName', '')
+        result['hookCommand'] = hook_data.get('command', '')
+        result['toolUseID'] = data.get('toolUseID', '')
+        result['parentToolUseID'] = data.get('parentToolUseID', '')
+
+    return result
 
 
 def parse_kernelcat_message(data: Dict, file_name: str, session_id: str) -> Dict[str, Any]:
@@ -166,6 +188,14 @@ def load_messages_from_file(file_path: Path, cli_name: str = 'claude-code') -> L
                     if cli_name == 'claude-code':
                         # Claude Code 格式: type 在顶层
                         if data.get('type') in ['user', 'assistant']:
+                            msg = parse_claude_code_message(data, file_path.name)
+                            messages.append(msg)
+                        # 添加对hook消息的解析
+                        elif data.get('type') == 'system' and data.get('subtype') == 'stop_hook_summary':
+                            msg = parse_claude_code_message(data, file_path.name)
+                            messages.append(msg)
+                        # 添加对hook_progress消息的解析
+                        elif data.get('type') == 'progress' and data.get('data', {}).get('type') == 'hook_progress':
                             msg = parse_claude_code_message(data, file_path.name)
                             messages.append(msg)
 
@@ -301,8 +331,8 @@ def load_all_messages(directory: Path, include_agents: bool = False, cli_name: s
     all_messages = []
 
     if cli_name == 'claude-code':
-        # Claude Code: 扁平目录结构，所有文件在同一目录
-        jsonl_files = list(directory.glob('*.jsonl'))
+        # Claude Code: 扁平目录结构，所有文件在同一目录，但agent文件可能在子目录中
+        jsonl_files = list(directory.glob('**/*.jsonl'))
 
         # 过滤 agent 文件
         if not include_agents:
@@ -337,10 +367,12 @@ def load_all_messages(directory: Path, include_agents: bool = False, cli_name: s
 def format_tool_use(tool_item: Dict, use_color: bool = True) -> str:
     """格式化工具调用"""
     tool_name = tool_item.get('name', 'unknown')
-    tool_id = tool_item.get('id', '')[:12]
+    tool_id = tool_item.get('id', '')
+    # 显示更长的ID以区分不同调用（前20个字符）
+    tool_id_display = tool_id[:20] if len(tool_id) > 20 else tool_id
     tool_input = tool_item.get('input', {})
 
-    header = f"🔧 工具调用: {tool_name} [{tool_id}]"
+    header = f"🔧 工具调用: {tool_name} [{tool_id_display}]"
     lines = [f"\n┌─ {colorize(header, Colors.TOOL_CALL, use_color)}"]
 
     # 显示主要参数
@@ -381,6 +413,26 @@ def format_tool_use(tool_item: Dict, use_color: bool = True) -> str:
         lines.append(f"│  任务: {description}")
         lines.append(f"│  代理: {subagent_type}")
 
+    elif tool_name == 'TaskUpdate':
+        # TaskUpdate工具 - 显示任务更新信息
+        task_id = tool_input.get('taskId', '')
+        status = tool_input.get('status', '')
+        lines.append(f"│  任务ID: {task_id}")
+        lines.append(f"│  新状态: {status}")
+
+    elif tool_name == 'Skill':
+        # Skill 调用 - 特殊处理
+        skill_name = tool_input.get('skill', '')
+        skill_args = tool_input.get('args', '')
+
+        # 使用特殊标记
+        header = f"⚡ Skill调用: {skill_name} [{tool_id_display}]"
+        lines[0] = f"\n┌─ {colorize(header, Colors.HIGHLIGHT, use_color)}"
+
+        lines.append(f"│  Skill: {colorize(skill_name, Colors.HIGHLIGHT, use_color)}")
+        if skill_args:
+            lines.append(f"│  参数: {skill_args}")
+
     else:
         # 其他工具，显示所有参数
         for key, value in tool_input.items():
@@ -400,10 +452,12 @@ def format_tool_result(result_item: Dict, truncate: bool = False, use_color: boo
         truncate: 是否截断长输出（默认False，显示完整内容）
         use_color: 是否使用颜色
     """
-    tool_id = result_item.get('tool_use_id', '')[:12]
+    tool_id = result_item.get('tool_use_id', '')
+    # 显示更长的ID以区分不同调用（前20个字符）
+    tool_id_display = tool_id[:20] if len(tool_id) > 20 else tool_id
     content = result_item.get('content', '')
 
-    header = f"✅ 工具输出 [{tool_id}]"
+    header = f"✅ 工具输出 [{tool_id_display}]"
     lines = [f"\n┌─ {colorize(header, Colors.TOOL_OUTPUT, use_color)}"]
 
     # 处理不同类型的内容
@@ -537,6 +591,166 @@ def display_messages(messages: List[Dict[str, Any]],
 
     for i, msg in enumerate(messages, 1):
         msg_type = msg['type']
+
+        # 处理hook消息（system类型的stop_hook_summary和progress类型的hook_progress）
+        if (msg_type == 'system' and msg.get('subtype') == 'stop_hook_summary') or \
+           (msg_type == 'progress' and msg.get('subtype') == 'hook_progress'):
+            subtype = msg.get('subtype', '')
+
+            # Hook消息特殊显示
+            role = colorize("🪝 Hook", Colors.HIGHLIGHT, use_color)
+            timestamp = format_timestamp(msg['timestamp'])
+            timestamp_colored = colorize(timestamp, Colors.TIMESTAMP, use_color)
+
+            separator = colorize('─'*80, Colors.SEPARATOR, use_color)
+            print(f"\n{separator}")
+            print(f"[{i}] {role} - {timestamp_colored}")
+
+            meta_info = f"会话: {msg['session_id'][:8]}... | 文件: {msg['file']}"
+            print(colorize(meta_info, Colors.INFO, use_color))
+            print(separator)
+
+            if subtype == 'hook_progress':
+                # hook_progress类型：直接使用hookName字段
+                hook_name = msg.get('hookName', 'Unknown')
+                hook_event = msg.get('hookEvent', '')
+                hook_command = msg.get('hookCommand', '')
+                tool_use_id = msg.get('toolUseID', '')
+
+                print(colorize(f"   Hook名称: {hook_name}", Colors.HIGHLIGHT, use_color))
+                if hook_event:
+                    print(colorize(f"   Hook事件: {hook_event}", Colors.INFO, use_color))
+
+                # 查找触发该hook的工具
+                triggering_tool = None
+                for j in range(i-2, max(-1, i-50), -1):
+                    if j < 0:
+                        break
+                    prev_msg = messages[j]
+                    if prev_msg['type'] == 'assistant':
+                        content = prev_msg.get('message', {}).get('content', [])
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and item.get('type') == 'tool_use':
+                                    if tool_use_id and item.get('id') == tool_use_id:
+                                        triggering_tool = item
+                                        break
+                        if triggering_tool:
+                            break
+
+                if triggering_tool:
+                    tool_name = triggering_tool.get('name', 'unknown')
+                    tool_id = triggering_tool.get('id', '')
+                    tool_id_short = tool_id[:20] if len(tool_id) > 20 else tool_id
+                    print(colorize(f"   🔧 触发工具: {tool_name} [{tool_id_short}]", Colors.TOOL_CALL, use_color))
+
+                if hook_command:
+                    print(f"\n   Hook命令:")
+                    if len(hook_command) > 200:
+                        hook_command = hook_command[:200] + '...'
+                    print(f"      {hook_command}")
+
+                print()
+                continue
+
+            elif subtype == 'stop_hook_summary':
+
+                # 显示hook详细信息
+                hook_count = msg.get('hookCount', 0)
+                hook_infos = msg.get('hookInfos', [])
+                hook_errors = msg.get('hookErrors', [])
+                prevented = msg.get('preventedContinuation', False)
+                tool_use_id = msg.get('toolUseID', '')
+
+                # 查找触发该hook的工具
+                # 策略1: 尝试通过toolUseID精确匹配
+                # 策略2: 如果找不到，显示最近调用的工具（很可能就是触发者）
+                triggering_tool = None
+
+                # 向前查找最近的assistant消息中的tool_use
+                for j in range(i-2, max(-1, i-50), -1):  # 向前搜索最多50条消息
+                    if j < 0:
+                        break
+                    prev_msg = messages[j]
+                    if prev_msg['type'] == 'assistant':
+                        content = prev_msg.get('message', {}).get('content', [])
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and item.get('type') == 'tool_use':
+                                    # 先尝试精确匹配
+                                    if tool_use_id and item.get('id') == tool_use_id:
+                                        triggering_tool = item
+                                        break
+                                    # 如果还没找到触发工具，记录最近的工具
+                                    elif not triggering_tool:
+                                        triggering_tool = item
+                        if triggering_tool and tool_use_id and triggering_tool.get('id') == tool_use_id:
+                            # 找到精确匹配，停止搜索
+                            break
+
+                # stop_hook_summary类型的hook名称是"Stop"
+                print(colorize(f"   Hook名称: Stop", Colors.HIGHLIGHT, use_color))
+
+                if triggering_tool:
+                    tool_name = triggering_tool.get('name', 'unknown')
+                    tool_id = triggering_tool.get('id', '')
+                    tool_id_short = tool_id[:20] if len(tool_id) > 20 else tool_id
+
+                    # 判断是精确匹配还是推测
+                    is_exact = (tool_use_id and tool_id == tool_use_id)
+                    prefix = "🔧 触发工具" if is_exact else "🔧 可能触发工具"
+
+                    print(colorize(f"   {prefix}: {tool_name} [{tool_id_short}]", Colors.TOOL_CALL, use_color))
+
+                    # 显示工具的关键参数
+                    tool_input = triggering_tool.get('input', {})
+                    if tool_name == 'Bash':
+                        cmd = tool_input.get('command', '')
+                        if cmd:
+                            # 截断过长的命令
+                            if len(cmd) > 100:
+                                cmd = cmd[:100] + '...'
+                            print(f"      命令: {cmd}")
+                    elif tool_name in ['Read', 'Write', 'Edit']:
+                        file_path = tool_input.get('file_path', '')
+                        if file_path:
+                            print(f"      文件: {file_path}")
+                    elif tool_name == 'Skill':
+                        skill_name = tool_input.get('skill', '')
+                        if skill_name:
+                            print(f"      Skill: {skill_name}")
+
+                if hook_infos:
+                    print(f"\n   Hook信息:")
+                    for idx, info in enumerate(hook_infos, 1):
+                        # 如果有多个hookInfo，显示编号
+                        prefix = f"{idx}. " if len(hook_infos) > 1 else ""
+
+                        # 检查是否有command字段
+                        if 'command' in info:
+                            command = info['command']
+                            # 截断过长的命令
+                            if len(command) > 200:
+                                command = command[:200] + '...'
+                            print(f"      {prefix}命令: {command}")
+
+                        # 检查是否有promptText字段（prompt-based hooks）
+                        if 'promptText' in info:
+                            prompt = info['promptText']
+                            # 截断过长的prompt
+                            if len(prompt) > 200:
+                                prompt = prompt[:200] + '...'
+                            # 如果同时有command，缩进显示prompt
+                            indent = "         " if 'command' in info else f"      {prefix}"
+                            print(f"{indent}Prompt: {prompt}")
+
+                if hook_errors:
+                    print(colorize(f"\n   ❌ Hook错误:", Colors.TOOL_CALL, use_color))
+                    for error in hook_errors:
+                        print(f"      • {error}")
+
+                print()
+                continue
 
         # 用户消息用红色，助手消息用蓝色
         if msg_type == 'user':

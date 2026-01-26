@@ -8,6 +8,8 @@
 - 官方 Anthropic Claude 命令行工具
 - 扁平文件结构：所有 `.jsonl` 文件在同一目录
 - 支持按会话过滤、去重等功能
+- **支持Skill调用解析**：自动识别和统计Skill工具调用（如migration4accelerate_hardware、general_migration等）
+- **支持Hook调用解析**：自动识别和统计Hook调用（如stop hook等），并显示触发该hook的工具信息
 
 ### kernelcat
 - 第三方 AI CLI 工具
@@ -72,6 +74,9 @@ python3 view_chat_history.py --cli-name kcat --file /path/to/session.jsonl --lim
 ```bash
 # Claude Code 统计
 python3 chat_stats.py
+
+# 统计信息会自动包含Hook/Skill调用统计（如果有的话）
+# 显示每种skill的调用次数和占比
 
 # kernelcat 统计
 python3 chat_stats.py /path/to/kernelcat/sessions --cli-name kcat
@@ -146,6 +151,141 @@ python3 view_chat_history.py --include-agents
 | `--file JSONL` | 直接指定单个jsonl文件 | `--file /path/to/session.jsonl` |
 | `--group-by-project` | 按项目分组统计（仅 chat_stats.py）| `--group-by-project` |
 
+## Hook调用解析功能
+
+工具支持解析Claude Code的Hook调用历史。Hook是在特定事件（如工具执行、会话停止等）触发的自定义脚本或LLM检查。
+
+### Hook消息类型
+
+Claude Code中有两种Hook消息类型：
+
+#### 1. Stop Hook（停止钩子）
+- **消息类型**: `type: "system", subtype: "stop_hook_summary"`
+- **触发时机**: 当Claude停止响应时
+- **用途**: 检查任务完成状态、验证输出等
+- **Hook名称**: `Stop`
+
+#### 2. PostToolUse Hook（工具后钩子）
+- **消息类型**: `type: "progress", data.type: "hook_progress"`
+- **触发时机**: 在工具执行成功后
+- **用途**: 验证工具输出、执行后续操作等
+- **Hook名称**: `PostToolUse:ToolName`（如 `PostToolUse:Bash`、`PostToolUse:Edit`）
+- **位置**: 通常在subagent文件中（需要使用 `--include-agents` 加载）
+
+### Hook配置类型
+
+Hook可以配置为两种执行方式：
+
+1. **命令型Hook**: 执行bash命令
+   ```json
+   {"command": "date >> ~/hook.log"}
+   ```
+
+2. **Prompt型Hook**: 使用LLM评估
+   ```json
+   {
+     "command": "检查todolist完成情况...",
+     "promptText": "检查todolist完成情况..."
+   }
+   ```
+
+### 查看Hook消息
+
+```bash
+# 查看主会话中的Hook（Stop hooks）
+python3 view_chat_history.py /path/to/sessions
+
+# 查看所有Hook（包括subagent中的PostToolUse hooks）
+python3 view_chat_history.py /path/to/sessions --include-agents
+```
+
+### Hook显示内容
+
+当查看对话历史时，Hook消息会显示：
+- 🪝 Hook标识
+- **Hook名称**（Stop 或 PostToolUse:ToolName）
+- **Hook事件**（仅PostToolUse类型）
+- **触发该hook的工具**（工具名称、ID和关键参数）
+- **Hook命令**（command字段）
+- **Hook Prompt**（promptText字段，如果是prompt型hook）
+- **Hook错误信息**（如果有）
+
+### 示例输出
+
+#### Stop Hook示例
+```
+🪝 Hook - 2026-01-24 18:02:31
+────────────────────────────────────────────────────────────────────────────────
+   Hook名称: Stop
+   🔧 可能触发工具: Grep [call_f7d1d4072362480]
+
+   Hook信息:
+      命令: 请检查你是否完成了当前的所有的todolist，如果没有，请继续...
+         Prompt: 请检查你是否完成了当前的所有的todolist，如果没有，请继续...
+```
+
+#### PostToolUse Hook示例
+```
+🪝 Hook - 2026-01-24 08:07:49
+────────────────────────────────────────────────────────────────────────────────
+   Hook名称: PostToolUse:Read
+   Hook事件: PostToolUse
+   🔧 触发工具: Read [tooluse_XpJzrwwrS72y]
+
+   Hook命令:
+      callback
+```
+
+### Hook统计信息
+
+使用`chat_stats.py`可以查看Hook统计：
+- 总调用次数
+- 错误次数
+- 阻止继续执行的次数
+
+### 技术细节
+
+#### Hook消息结构
+
+**Stop Hook (stop_hook_summary)**:
+```json
+{
+  "type": "system",
+  "subtype": "stop_hook_summary",
+  "hookCount": 1,
+  "hookInfos": [
+    {
+      "command": "bash command or prompt text",
+      "promptText": "prompt text (optional)"
+    }
+  ],
+  "hookErrors": ["error messages"],
+  "preventedContinuation": false,
+  "toolUseID": "uuid-of-related-tool"
+}
+```
+
+**PostToolUse Hook (hook_progress)**:
+```json
+{
+  "type": "progress",
+  "data": {
+    "type": "hook_progress",
+    "hookEvent": "PostToolUse",
+    "hookName": "PostToolUse:Bash",
+    "command": "callback or bash command"
+  },
+  "toolUseID": "tool-id",
+  "parentToolUseID": "parent-tool-id"
+}
+```
+
+#### 文件位置
+
+- **主会话文件**: 包含Stop hooks
+- **Subagent文件**: 包含PostToolUse hooks（位于 `session-id/subagents/agent-*.jsonl`）
+- 使用 `--include-agents` 参数可加载subagent文件中的hooks
+
 ## 颜色说明（v3.0新增）
 
 脚本会自动检测终端颜色支持，为不同内容添加颜色，轻重分明：
@@ -156,6 +296,7 @@ python3 view_chat_history.py --include-agents
 | 🤖 助手消息 | **蓝色** | Claude的回答 |
 | 💭 思考过程 | 暗淡灰色 | 不重要的内容，视觉权重低 |
 | 🔧 工具调用 | **黄色** | 工具操作醒目 |
+| ⚡ Hook/Skill调用 | **绿色**（高亮）| Skill工具调用，特别标识 |
 | ✅ 工具输出 | 青色 | 工具结果清晰 |
 | ⏰ 元信息 | 灰色 | 时间戳、会话ID等 |
 
