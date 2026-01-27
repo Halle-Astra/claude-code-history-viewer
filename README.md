@@ -182,12 +182,16 @@ Hook消息有两种底层格式：
 - **消息类型**: `type: "system", subtype: "stop_hook_summary"`
 - **常见用途**: Stop事件的hook摘要
 - **位置**: 主会话文件中
+- **版本要求**: 所有Claude Code版本
 
 #### 2. hook_progress格式
 - **消息类型**: `type: "progress", data.type: "hook_progress"`
 - **包含字段**: `hookEvent`（事件类型）、`hookName`（完整名称）
 - **常见用途**: PostToolUse、PreToolUse等事件
 - **位置**: 通常在subagent文件中（需要使用 `--include-agents` 加载）
+- **版本要求**: ⚠️ **仅Claude Code 2.1.19及以后版本**
+
+**重要提示**: 如果你的会话文件来自Claude Code 2.1.19之前的版本，将只能看到`stop_hook_summary`格式的hook消息，不会有`hook_progress`类型的消息。
 
 **注意**: 这两种格式可以表示任何Hook事件类型，具体事件由 `hookEvent` 或上下文决定。
 
