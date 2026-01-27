@@ -330,20 +330,22 @@ python3 view_chat_history.py /path/to/sessions --include-agents
 ### 1. 快速浏览最近的对话（推荐）
 
 ```bash
-# 去重 + 不显示思考 + 只看最近50条
-python3 view_chat_history.py --limit 50 --no-thinking --deduplicate
+# 不显示思考 + 只看最近50条（默认已启用去重）
+python3 view_chat_history.py --limit 50 --no-thinking
 ```
 
-### 2. 处理重复消息问题
+### 2. 关于重复消息处理
 
-如果发现不同session有交叉内容（这是Claude Code的正常现象），使用 `--deduplicate` 去重：
+**默认行为**：工具会自动去除重复消息（不同session的交叉内容）。
+
+如果需要查看所有消息包括重复的，使用 `--no-deduplicate`：
 
 ```bash
-# 去重后查看所有对话
-python3 view_chat_history.py --deduplicate
+# 不去重，查看所有消息（包括重复的）
+python3 view_chat_history.py --no-deduplicate
 
-# 去重后导出
-python3 view_chat_history.py --deduplicate --export clean_history.txt
+# 不去重导出
+python3 view_chat_history.py --no-deduplicate --export full_history.txt
 ```
 
 **去重说明**：
